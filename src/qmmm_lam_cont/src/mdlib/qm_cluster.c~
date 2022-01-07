@@ -1,0 +1,514 @@
+/*
+ * $Id: qm_mpqc.c,v 1.4.2.1 2009/07/19 23:06:26 Tjornhammar Exp $
+ * 
+ *                This source code is part of
+ * 
+ *                 G   R   O   M   A   C   S
+ * 
+ *          GROningen MAchine for Chemical Simulations
+ * 
+ *                        VERSION 4.0.7
+ * Written by David van der Spoel, Erik Lindahl, Berk Hess, and others.
+ * Copyright (c) 1991-2000, University of Groningen, The Netherlands.
+ * Copyright (c) 2001-2004, The GROMACS development team,
+ * check out http://www.gromacs.org for more information.
+ 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * If you want to redistribute modifications, please consider that
+ * scientific software is very special. Version control is crucial -
+ * bugs must be traceable. We will be happy to consider code for
+ * inclusion in the official distribution, but derived work must not
+ * be called official GROMACS. Details are found in the README & COPYING
+ * files - if they are missing, get the official version at www.gromacs.org.
+ * 
+ * To help us fund GROMACS development, we humbly ask that you cite
+ * the papers on the package - you can find them in the top README file.
+ * 
+ * For more info, check our website at http://www.gromacs.org
+ * 
+ * And Hey:
+ * GROwing Monsters And Cloning Shrimps
+ */
+
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <math.h>
+#include "sysstuff.h"
+#include "typedefs.h"
+#include "macros.h"
+#include "smalloc.h"
+#include "assert.h"
+#include "physics.h"
+#include "macros.h"
+#include "vec.h"
+#include "force.h"
+#include "invblock.h"
+#include "confio.h"
+#include "names.h"
+#include "network.h"
+#include "pbc.h"
+#include "ns.h"
+#include "nrnb.h"
+#include "bondf.h"
+#include "mshift.h"
+#include "txtdump.h"
+#include "copyrite.h"
+#include "qmmm.h"
+#include <stdio.h>
+#include <string.h>
+#include "gmx_fatal.h"
+#include "typedefs.h"
+#include <stdlib.h>
+#include <errno.h>
+
+int anint001(double r)
+{
+   int sign,res;
+   double frac,part;
+   
+   sign=(r>=0)?1:-1;
+   frac=modf(r,&part);
+
+   res=(part+((frac*sign>=0.5)?1.0:0.0)*sign);
+
+   return(res);   
+
+}
+
+double roundChrg(double chrg)
+{
+  double rchrg,schrg,cchrg;
+  
+  schrg=(chrg>=0.0)?(1.0):(-1.0);
+  cchrg=(chrg>(-1*chrg))?(chrg):(-1*chrg);
+  rchrg=ceil(cchrg)*schrg;
+  
+  return(rchrg);
+}
+
+void printClustering(t_QMrec *qm,FILE *fpo)
+{
+  int i,j,k,N,C=-1;
+
+  N=qm->nrQMatoms;
+
+  for(i=0;i<N;i++){
+    if(!(C==(qm->QMcluster[i*2]))){
+      C=qm->QMcluster[i*2];
+    }
+    fprintf(fpo,"\n %5d %5d",qm->QMcluster[i*2],qm->QMcluster[i*2+1]);
+  }
+}
+
+void sortClusters(t_QMrec *qm)
+{
+ int i,j,k,l,m,nrEntries;
+
+ int sa,sb;
+ int ft,ft2;
+ nrEntries=qm->nrQMatoms;
+
+ for(sa = 1; sa < nrEntries; ++sa)
+   for(sb = nrEntries-1; sb >= sa; --sb) {
+     // compare adjacent elements 
+     if(qm->QMcluster[ (sb - 1)*2] < qm->QMcluster[ sb*2 ]) {
+       // exchange elements 
+       ft = qm->QMcluster[ (sb - 1)*2 ];
+       ft2= qm->QMcluster[ (sb - 1)*2+1];
+       qm->QMcluster[ (sb - 1)*2 ] = qm->QMcluster[ sb*2 ];
+       qm->QMcluster[ (sb - 1)*2 +1 ] = qm->QMcluster[ sb*2 + 1 ];
+       qm->QMcluster[ sb*2 ] = ft;
+       qm->QMcluster[ sb*2 + 1 ] = ft2;
+     }
+   }
+}
+
+
+
+void qmmmPBC(t_QMrec *qm, rvec R[2])
+{
+  int i,j,k,l,m,n,AA;
+  real tmp=0.0;
+
+  AA=( (qm->ePBC==epbcXY)?(YY):((qm->ePBC==epbcXYZ) ?(ZZ):(XX-1)) );
+
+  for(j=XX;j<=AA;j++){
+      R[1][j]=anint001((double)(R[0][j]/qm->box[j][j]))*(-1.0);
+      R[0][j]+=qm->box[j][j]*R[1][j];
+  }
+}
+
+void clusterAlgorithm(t_QMrec *qm,FILE *fpo)
+{
+  int i,j,k,l,m,N,q;
+  int flag,C,oC;
+
+  N=qm->nrQMatoms;
+
+  for(i=0;i<N;i++){
+    qm->QMcluster[2*i]=i+1; //index
+    qm->QMcV[i]=0;          //visited
+  }
+  C=-1;
+  for(i=0;i<N;i++){
+    flag=1;
+    for(j=0;j<N;j++){
+      if( !(qm->QMcV[j]) ){
+	if( qm->QMcB[i*N+j] ){
+	  qm->QMcV[j]=1;
+	  qm->QMcV[i]=1;
+	  if((qm->QMcluster[2*i])>0)
+	    qm->QMcluster[2*j]=C;
+	  else
+	    qm->QMcluster[2*j]=(qm->QMcluster[2*i]);
+	}
+      }else{
+	if( qm->QMcB[i*N+j] )
+	  if(qm->QMcluster[2*j]<0)
+	    qm->QMcluster[2*i]=qm->QMcluster[2*j];
+      }
+      if( !(qm->QMcB[i*N+j]) && flag){
+	C--; flag=0;
+      }
+    }
+  }
+  for(q=0;q<N;q++){
+  for(j=(N-1);j>=0;j--){
+    for(i=(N-1);i>=0;i--){
+      if((qm->QMcluster[2*i])!=(qm->QMcluster[2*j])& (qm->QMcB[i*N+j])){
+	for(k=0;k<N;k++){ //THE K LOOP SOLVED A PREVIOUS CLUSTERING ERROR
+	  if((qm->QMcluster[2*k])==(qm->QMcluster[2*j]) || (qm->QMcluster[2*k])==(qm->QMcluster[2*i])){
+	    (qm->QMcluster[2*k])=(qm->QMcluster[2*i]);
+	  }
+	}
+      }
+    }
+    (qm->QMcluster[2*j+1])=j;
+  }
+  }
+
+  //MAKE CLUSTERS SEQUENTIAL
+  C=0; oC=(int)(qm->QMcluster[0]); qm->QMcV[0]=oC;
+  for(i=0;i<N;i++){
+    if(qm->QMcluster[2*i]<oC){
+      C++;oC=qm->QMcluster[2*i];
+      qm->QMcV[C]=oC;
+    }
+  }
+  sortClusters(qm);
+
+  fprintf(fpo,"\n\n");
+  for(j=0;j<=C;j++){
+    for(i=0;i<N;i++){
+      if(qm->QMcluster[2*i] == qm->QMcV[j])
+	qm->QMcluster[2*i]=j;
+      if(j == C)
+	fprintf(fpo,"Index::% 4d Cluster::% 4d \n",qm->QMcluster[2*i+1],(qm->QMcluster[2*i]));
+    }
+  }
+  qm->nrQMc=C+1;
+}
+
+void makeDistance(t_QMrec *qm, FILE *fpo)
+{
+  int   i,j,k,l,N,C,oC,flag,NP;
+  float RL=0.3;
+  rvec  dist[2];
+
+  N=qm->nrQMatoms;
+  fprintf(fpo,"%Distance matrix from gromacs\nN=%d; A=[\n",N);
+  for(i=0;i<N;i++){
+    qm->QMcV[i]=i+1;
+    for(j=0;j<N;j++){
+      dist[0][XX]=qm->xQM[i][XX]-qm->xQM[j][XX];
+      dist[0][YY]=qm->xQM[i][YY]-qm->xQM[j][YY];
+      dist[0][ZZ]=qm->xQM[i][ZZ]-qm->xQM[j][ZZ];
+      //REMEMBER HERE xQM IS THE X RVEC ENTRY
+      qmmmPBC(qm,dist);
+
+      qm->QMcA[i*N+j]=sqrt( pow(dist[0][XX],2.0) + pow(dist[0][YY],2.0) + pow(dist[0][ZZ],2.0) );
+      qm->QMcB[i*N+j]=(qm->QMcA[i*N+j]<=RL)?1.0:0.0;
+      
+      if(qm->QMcB[i*N+j]){
+	for(k=XX;k<=ZZ;k++){
+	  qm->rQM[i][k]=qm->xQM[i][k]+dist[1][k]*(qm->box[k][k]);
+	}
+      }
+      fprintf(fpo," % 9.5f ",qm->QMcA[i*N+j]);
+    }
+    fprintf(fpo,"\n");
+  }
+  fprintf(fpo,"\n];\n");
+  
+  fprintf(fpo,"%Boolean matrix from gromacs\n B=[\n",N);
+  for(i=0;i<N;i++){
+    for(j=0;j<N;j++){
+      fprintf(fpo," %d",qm->QMcB[i*N+j]);
+    }
+    fprintf(fpo,"\n");
+  }
+  fprintf(fpo,"];\n\n");
+  
+  for(i=0;i<N;i++){
+    fprintf(fpo,"% 5d ",qm->QMcV[i]);
+  }
+
+  fprintf(fpo,"\n\n");
+}
+
+void clusterPositions(t_QMrec *qm)
+{
+  int   i,j,k,l,N,C,oC,flag,NP;
+  N=qm->nrQMatoms;
+
+  oC=0; NP=0;
+  for(i=0;i<N;i++){
+    if(oC-qm->QMcluster[i*2]==0){
+      NP++;
+      for(j=XX;j<=ZZ;j++){
+	qm->QMcluspos[oC][j]+=qm->rQM[qm->QMcluster[2*i+1]][j];
+      }
+    }else{
+      for(j=XX;j<=ZZ;j++){
+	qm->QMcluspos[oC][j]=(qm->QMcluspos[oC][j])/((float)NP);
+      }
+      NP=1;
+      oC=qm->QMcluster[i*2];
+      if( i== (N-1) ){
+	for(j=XX;j<=ZZ;j++){
+	  qm->QMcluspos[oC][j]+=qm->rQM[qm->QMcluster[2*i+1]][j];
+	}
+      }
+    }
+  }
+}
+
+void clustering(t_QMrec *qm)
+{
+  int   i,j,k,l,N,C,oC,flag,NP;
+  float RL=0.3;
+  rvec  dist[2];
+  FILE  *fpo;
+
+  fpo=fopen("outpclust.m","w");
+
+  N=qm->nrQMatoms;
+
+  makeDistance(qm,fpo);     //CREATE DISTANCE MATRIX
+
+  clusterAlgorithm(qm,fpo); //DO CLUSTER SEARCH
+
+  C=qm->nrQMc;
+
+  if(C>N){
+    gmx_fatal(FARGS,"IMPOSSIBLE CLUSTERING SITUATION");
+  }
+
+  fprintf(fpo,"\nFOUND %6d CLUSTER(S)\n\n",C);
+  
+  printClustering(qm,fpo);
+
+  fclose(fpo);
+}
+
+void one_cluster(t_MMrec *mm, t_QMrec *qm)
+{
+  int i,j,k;
+
+  for(i=0;i<qm->nrQMatoms;i++){ //QM
+    qm->QMcluster[i*2]=0;
+    qm->QMcluster[i*2+1]=i;
+  }
+  for(i=0;i<mm->nrMMatoms;i++){ //MM
+    mm->MMcluster[i]=1;
+  }
+  for(i=0;i<qm->nrQMatoms;i++){ //QA
+    mm->MMcluster[i+mm->nrMMatoms]=0;
+  }
+}
+
+void clusterMM(t_MMrec *mm, t_QMrec *qm)
+{
+  //SIMPLE DISTANCE SEARCH FOR CLOSEST CLUSTER
+  int a,b,nrQMc=0,i,j,k,kk,l,nrQMa=0,nrMM,nrCOL,aa,bb;
+  rvec R[2];
+  double D[3],D0=100000000.0,RC=1.0,R0,D1=0.5;
+  /*
+    Motivation for RC choice 
+    RC=1.0 is ca 200 atoms in spherical volume around an atom
+    Strong polarisation effects occur within ca 1nm of an ionic center 
+    If the charge is not extreme
+  */
+
+  nrQMc=qm->nrQMc; 
+  nrQMa=qm->nrQMatoms;
+  nrMM=mm->nrMMatoms; 
+  nrCOL=nrMM+nrQMa;
+
+  for(j=0;j<nrMM;j++){
+    D0=100000000.0; k=0;
+    for(i=0;i<nrQMa;i++){  /* CALCULATE DISTANCE BETWEEN POINT AND ALL QM ATOM CLUSTERS */
+      a=qm->QMcluster[i*2];
+      b=qm->QMcluster[i*2+1];
+      R[0][XX]=mm->xMM[j][XX]-qm->xQM[i][XX]; //CHECKS FOR CLOSEST QM ATOM IN THE X RVEC
+      R[0][YY]=mm->xMM[j][YY]-qm->xQM[i][YY];
+      R[0][ZZ]=mm->xMM[j][ZZ]-qm->xQM[i][ZZ];
+      qmmmPBC(qm,R);                          //ACCOUNTS FOR PBC 
+      R0=sqrt(pow(R[0][XX],2.0)+pow(R[0][YY],2.0)+pow(R[0][ZZ],2.0));
+      for(kk=XX;kk<=ZZ;kk++){
+	mm->rMM[j+a*nrCOL][kk]=mm->xMM[j][kk]+R[1][kk]*(qm->box[kk][kk]); //CREATES A SHIFTED COORDINATE
+      }
+      l=(R0<RC)?1:0;                      /* CUTOFF SEARCH */
+      mm->MMcluster[nrCOL*a+j]     = l;   /* * */
+      mm->MMcluster[nrCOL*nrQMc+j]+= l;   /* SUMS UP THE NUMBER OF TIMES AN ATOM IS CALLED */
+      if(R0<D0){                          /* SEARCH FOR CLOSEST CLUSTER AND ASSIGN IT */
+	k=i; D0=R0;
+      }
+    }
+    mm->MMcluster[nrCOL*k+j] = 1; /* ENSURES THAT ALL ATOMS ARE PRESENT IN ATLEAST ONE CLUSTER */
+  }
+  //NOW ASSIGN Q CHARGES FROM THE OTHER CLUSTERS QM ATOMS (DONE)
+  for(j=0;j<nrQMa;j++){         /* ADD Q ATOMS */
+    a=qm->QMcluster[j*2];       /* CLUSTER INDEX a:(0 -> NC-1) */
+    b=qm->QMcluster[j*2+1];     /* QM INDEX      b:(0 -> nrQM-1) */
+    for(i=0; i<nrQMa ;i++){     /* DISTANCE BETWEEN POINT AND THE CLUSTER THIS QM ATOM BELONGS TO */
+      aa=qm->QMcluster[i*2];
+      bb=qm->QMcluster[i*2+1];
+      l=((qm->QMcA[b*nrQMa+bb]<=RC) && (a!=aa) )?0:0; //TURNED OFF	
+      for(kk=XX;kk<=ZZ;kk++){
+	mm->rMM[b+nrMM+aa*nrCOL][kk]=qm->rQM[b][kk];
+      }
+      mm->MMcluster[(nrCOL*aa+(b+nrMM))] = l;
+    }
+  }
+}
+
+char* getAtomNameMPQC(int i)
+{
+  char* atomName[120];
+
+  atomName[0]="LA";
+  atomName[1]=" H"; 
+  atomName[2]="He";
+  atomName[3]="Li";
+  atomName[4]="Be";
+  atomName[5]=" B";
+  atomName[6]=" C";
+  atomName[7]=" N";
+  atomName[8]=" O";
+  atomName[9]=" F";
+  atomName[10]="Ne";
+  atomName[11]="Na";
+  atomName[12]="Mg";
+  atomName[13]="Al";
+  atomName[14]="Si";
+  atomName[15]=" P";
+  atomName[16]=" S";
+  atomName[17]="Cl";
+  atomName[18]="Ar";
+  atomName[19]=" K";
+  atomName[20]="Ca";
+  atomName[21]="Sc";
+  atomName[22]="Ti";
+  atomName[23]=" V";
+  atomName[24]="Cr"; 
+  atomName[25]="Mn";
+  atomName[26]="Fe";
+  atomName[27]="Co";
+  atomName[28]="Ni";
+  atomName[29]="Cu";
+  atomName[30]="Zn";
+  atomName[31]="Ga";
+  atomName[32]="Ge";
+  atomName[33]="As";
+  atomName[34]="Se";
+  atomName[35]="Br";
+  atomName[36]="Kr";
+  atomName[37]="Rb";
+  atomName[38]="Sr";
+  atomName[39]=" Y";
+  atomName[40]="Zr";
+  atomName[41]="Nb";
+  atomName[42]="Mo";
+  atomName[43]="Tc";
+  atomName[44]="Ru";
+  atomName[45]="Rh";
+  atomName[46]="Pd";
+  atomName[47]="Ag";
+  atomName[48]="Cd";
+  atomName[49]="In";
+  atomName[50]="Sn";
+  atomName[51]="Sb";
+  atomName[52]="Te";
+  atomName[53]=" I";
+  atomName[54]="Xe";
+  atomName[55]="Cs";
+  atomName[56]="Ba";
+  atomName[57]="La";
+  atomName[58]="Ce";
+  atomName[59]="Pr";
+  atomName[60]="Nd"; 
+  atomName[61]="Pm";
+  atomName[62]="Sm";
+  atomName[63]="Eu";
+  atomName[64]="Gd";
+  atomName[65]="Tb";
+  atomName[66]="Dy";
+  atomName[67]="Ho";
+  atomName[68]="Er";
+  atomName[69]="Tm";
+  atomName[70]="Yb";
+  atomName[71]="Lu";
+  atomName[72]="Hf";
+  atomName[73]="Ta";
+  atomName[74]=" W";
+  atomName[75]="Re";
+  atomName[76]="Os";
+  atomName[77]="Ir";
+  atomName[78]="Pt";
+  atomName[79]="Au";
+  atomName[80]="Hg";
+  atomName[81]="Tl";
+  atomName[82]="Pb";
+  atomName[83]="Bi";
+  atomName[84]="Po";
+  atomName[85]="At";
+  atomName[86]="Rn";
+  atomName[87]="Fr";
+  atomName[88]="Ra";
+  atomName[89]="Ac";
+  atomName[90]="Th";
+  atomName[91]="Pa";
+  atomName[92]=" U";
+  atomName[93]="Np";
+  atomName[94]="Pu";
+  atomName[95]="Am";
+  atomName[96]="Cm";
+  atomName[97]="Bk";
+  atomName[98]="Cf";
+  atomName[99]="Es";
+  atomName[100]="Fm";
+  atomName[101]="Md";
+  atomName[102]="No";
+  atomName[103]="Lr";
+  atomName[104]="Rf";
+  atomName[105]="Db";
+  atomName[106]="Sg";
+  atomName[107]="Bh";
+  atomName[108]="Hs";
+  atomName[109]="Mt";
+  atomName[110]="Ds";
+  atomName[111]="Rg";
+
+  return atomName[i];
+}

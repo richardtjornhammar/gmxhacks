@@ -1,0 +1,33 @@
+
+ TITLE 1Zn2+ <-> 4S-
+ TITLE TEST CCAC PEPTIDE
+
+ HOLE 1   1.0   *  Zn K edge  (9659.0 eV), second number is S0^2
+
+ *         mphase,mpath,mfeff,mchi
+ CONTROL   1      1     1     1
+ PRINT     1      0     0     0
+
+ RMAX       12.0
+
+ *CRITERIA     curved   plane
+ *DEBYE        temp     debye-temp
+ NLEG         4
+
+ POTENTIALS
+ *    ipot   Z  element
+        0   30   Zn        
+        1   30   Zn        
+        2    6   C         
+        3   16   S         
+
+ ATOMS                          * this list contains 449 atoms
+ *   x          y          z      ipot  tag              distance
+    0.00000    0.00000    0.00000  0 zn1             0.00000
+   -1.47146   -0.67385   -0.71050  3 S_1             1.76751
+    1.20759    0.64410   -1.38860  3 S_2             1.94970
+    1.50992   -1.50315    1.49010  3 S_3             2.59995
+    2.58032   -0.70645   -0.63600  2 C_1             2.74984
+    2.54516   -0.83695    0.88860  2 C_2             2.82275
+   -2.55287    1.25600   -0.42440  2 C_3             2.87659
+

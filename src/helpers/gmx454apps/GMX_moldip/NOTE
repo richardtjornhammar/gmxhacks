@@ -1,0 +1,8 @@
+        fprintf(stderr, "  ");
+        gmx_ana_selection_print_info(sel[g]);
+        fprintf(stderr, "    ");
+
+                    sel[g]->p.x[i][XX], sel[g]->p.x[i][YY], sel[g]->p.x[i][ZZ],
+                    sel[g]->p.m.refid[i], sel[g]->p.m.mapid[i],
+                    sel[g]->p.m.mapb.index[i]+1,
+                    sel[g]->p.m.mapb.index[i+1]

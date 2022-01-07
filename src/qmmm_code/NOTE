@@ -1,0 +1,2 @@
+cp /home/r/richardt/Private/gromacs-4.0.7/src/kernel/mdrun /home/r/richardt/pfs/prg/cgmx/amdrun
+cp /home/r/richardt/Private/gromacs-4.0.7/src/kernel/grompp /home/r/richardt/pfs/prg/cgmx/agrompp

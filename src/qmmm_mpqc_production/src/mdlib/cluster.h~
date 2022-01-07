@@ -1,0 +1,34 @@
+#define DEBUG    0
+#define PI       3.1415926535898
+#define SIZE     3
+#define DIM      3
+#define MAXEL    1000
+#define VERBO    1
+#define max(a,b)     ((a)>(b)?(a):(b))
+#define min(a,b)     ((a)<(b)?(a):(b))
+
+typedef struct elem {
+  double  R[DIM];
+  int     nclust;
+} elem;
+
+typedef struct eleme {
+  double R[DIM];
+  double RAD;
+  int NPOINTS;
+  int IND[MAXEL];
+} alam;
+
+typedef struct CONTR {
+  elem dat;
+} CONTAINER;
+
+typedef struct CONTD {
+  alam dat;
+} CONTAINED;
+
+typedef CONTAINER *POINT;
+typedef CONTAINED *CLUST;
+
+void showCL(CLUST);
+void mergeCL(CLUST,CLUST);
